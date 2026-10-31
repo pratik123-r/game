@@ -39,6 +39,10 @@ function emitJoin(socket, roomId, userId, callback) {
   socket.emit("room:join", { roomId, userId }, callback);
 }
 
+// The server compares User IDs case-insensitively, so the client must too.
+const sameUser = (a, b) =>
+  Boolean(a) && Boolean(b) && String(a).toLowerCase() === String(b).toLowerCase();
+
 function App() {
   const savedUserId = useMemo(() => readStored(USER_KEY), []);
   const savedRoomId = useMemo(() => (savedUserId ? readStored(SESSION_KEY) : ""), [savedUserId]);
@@ -52,6 +56,7 @@ function App() {
   const [notice, setNotice] = useState("");
   const [chatInput, setChatInput] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
+  const [seenCount, setSeenCount] = useState(0);
   const [joining, setJoining] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [restoring, setRestoring] = useState(Boolean(savedUserId && savedRoomId));
@@ -81,6 +86,7 @@ function App() {
         }
         setRoomId(session.roomId);
         setRoom(response.room);
+        setSeenCount(response.room?.messages?.length || 0);
         setError("");
       });
     });
@@ -95,6 +101,7 @@ function App() {
       clearStored(SESSION_KEY);
       setRoom(null);
       setRoomId("");
+      setChatOpen(false);
       setNotice("");
       setError("This room expired after 4 hours and its data was cleared.");
     });
@@ -103,6 +110,7 @@ function App() {
       sessionRef.current = null;
       setRoom(null);
       setRoomId("");
+      setChatOpen(false);
       setError("This game was opened in another tab or window.");
     });
 
@@ -117,14 +125,33 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [room?.messages?.length]);
+  const messageCount = room?.messages?.length || 0;
 
-  const me = useMemo(() => room?.players?.find(player => player.userId === userId), [room, userId]);
+  // Keep the chat scrolled to the newest message while it is open.
+  useEffect(() => {
+    if (chatOpen) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messageCount, chatOpen]);
+
+  // While chat is open, everything counts as read.
+  useEffect(() => {
+    if (chatOpen) setSeenCount(messageCount);
+  }, [chatOpen, messageCount]);
+
+  // Clear the transient notice after a few seconds so it doesn't eat screen space.
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = setTimeout(() => setNotice(""), 3500);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  const me = useMemo(
+    () => room?.players?.find(player => sameUser(player.userId, userId)),
+    [room, userId]
+  );
   const isMyTurn = Boolean(room && me && room.status === "playing" && room.currentTurn === me.id);
   const selected = useMemo(() => new Set(room?.selectedNumbers || []), [room?.selectedNumbers]);
-  const myLines = useMemo(() => countLines(me?.board || [], selected), [me, selected]);
+  const myLines = useMemo(() => Math.min(5, countLines(me?.board || [], selected)), [me, selected]);
+  const unread = chatOpen ? 0 : Math.max(0, messageCount - seenCount);
 
   function joinRoom(event) {
     event.preventDefault();
@@ -157,6 +184,8 @@ function App() {
       setUserId(uid);
       setRoomId(id);
       setRoom(response.room);
+      setSeenCount(response.room?.messages?.length || 0);
+      setChatOpen(false);
       setNotice("");
     });
   }
@@ -215,6 +244,7 @@ function App() {
     socketRef.current?.emit("room:leave", {}, () => {});
     setRoom(null);
     setRoomId("");
+    setChatOpen(false);
     setError("");
     setNotice("");
   }
@@ -291,6 +321,9 @@ function App() {
 
   const activePlayer = room.players.find(player => player.id === room.currentTurn);
   const winner = room.players.find(player => player.id === room.winner);
+  const iWon = Boolean(winner && sameUser(winner.userId, userId));
+  // A finished game with no winner is a tie, even if the flag is missing.
+  const isTie = room.status === "finished" && (Boolean(room.isTie) || !winner);
   const bothOnline = room.players.length === 2 && room.players.every(player => player.connected);
   const expiryTime = room.expiresAt
     ? new Date(room.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
@@ -300,13 +333,13 @@ function App() {
   let turnHint;
   if (isMyTurn) {
     turnTitle = "Your turn — pick a number!";
-    turnHint = "Tap any available number on your board.";
+    turnHint = "Tap any available number.";
   } else if (!room.currentTurn) {
     turnTitle = "Waiting for both players to connect…";
-    turnHint = "A random player is picked to go first once both are online.";
+    turnHint = "A random player goes first once both are online.";
   } else {
     turnTitle = `${activePlayer?.name || "Opponent"} is picking`;
-    turnHint = "The same number will be marked on both boards.";
+    turnHint = "The number is marked on both boards.";
   }
 
   return (
@@ -327,50 +360,59 @@ function App() {
           <div className={`player-chip ${room.currentTurn === player.id && room.status === "playing" ? "is-active" : ""}`} key={player.id}>
             <div className={`player-avatar avatar-${index + 1}`}>{index + 1}</div>
             <div className="player-info">
-              <strong>{player.name}{player.userId === userId ? " (You)" : ""}</strong>
+              <strong>{player.name}{sameUser(player.userId, userId) ? " (You)" : ""}</strong>
               <small>{player.connected ? "Connected" : "Reconnecting..."}</small>
             </div>
             {room.currentTurn === player.id && room.status === "playing" && <span className="turn-dot" />}
           </div>
         ))}
         {room.players.length < 2 && (
-          <div className="waiting-chip"><span className="pulse-dot" /> Waiting for Player 2 to join…</div>
+          <div className="waiting-chip"><span className="pulse-dot" /> Waiting for Player 2…</div>
         )}
       </section>
 
       {room.status === "waiting" ? (
         <section className="waiting-card">
           <div className="waiting-icon">⌛</div>
-          <h2>Waiting for your friend</h2>
-          <p>Share the room ID below. The game starts automatically when the second player joins.</p>
+          <div className="waiting-text">
+            <h2>Waiting for your friend</h2>
+            <p>Share the room ID. The game starts when player 2 joins.</p>
+          </div>
           <button className="room-code" onClick={copyRoomId}>{roomId} <span>Copy</span></button>
         </section>
       ) : room.status === "finished" ? (
         <section className="winner-banner">
-          <div className="winner-trophy">🏆</div>
-          <div>
-            <p className="eyebrow">GAME OVER</p>
-            <h2>{winner?.userId === userId ? "You won!" : `${winner?.name || "Your opponent"} won!`}</h2>
-            <p>{winner?.name} completed five lines.</p>
+          <div className="winner-trophy">{isTie ? "🤝" : "🏆"}</div>
+          <div className="winner-text">
+            <p className="eyebrow">{isTie ? "IT'S A TIE" : "GAME OVER"}</p>
+            <h2>
+              {isTie
+                ? "It's a tie!"
+                : iWon
+                  ? "You won!"
+                  : `${winner?.name || "Your opponent"} won!`}
+            </h2>
             <p>
-              {winner?.userId === userId
-                ? "Your opponent goes first in the next game."
-                : "You go first in the next game."}
+              {isTie
+                ? "Both completed five lines on the same number. A random player goes first next."
+                : `${winner?.name} completed five lines. ${
+                    iWon ? "Your opponent goes first next." : "You go first next."
+                  }`}
             </p>
-            <button
-              className="primary-button restart-button"
-              onClick={restartGame}
-              disabled={restarting || !bothOnline}
-            >
-              {restarting ? "Restarting..." : "Play again"}
-            </button>
             {!bothOnline && <small>Both players need to be online to restart.</small>}
           </div>
+          <button
+            className="primary-button restart-button"
+            onClick={restartGame}
+            disabled={restarting || !bothOnline}
+          >
+            {restarting ? "Restarting..." : "Play again"}
+          </button>
         </section>
       ) : (
         <section className={`turn-banner ${isMyTurn ? "your-turn" : ""}`}>
           <span className="turn-icon">{isMyTurn ? "🎯" : "⏳"}</span>
-          <div>
+          <div className="turn-text">
             <strong>{turnTitle}</strong>
             <small>{turnHint}</small>
           </div>
@@ -378,52 +420,63 @@ function App() {
         </section>
       )}
 
-      <section className="board-card">
-        <div className="board-heading">
-          <div>
+      <div className={`game-main ${chatOpen ? "chat-is-open" : ""}`}>
+        <section className="board-card">
+          <div className="board-heading">
             <h2>Your board</h2>
-            <p>Tap a number when it’s your turn</p>
+            <span className="board-tag">5 × 5</span>
           </div>
-          <span className="board-tag">5 × 5</span>
-        </div>
-        {me && <BingoBoard board={me.board} selected={selected} disabled={!isMyTurn || room.status !== "playing"} onSelect={selectNumber} />}
-        <div className="board-legend">
-          <span><i className="legend-selected" /> Selected</span>
-          <span><i className="legend-available" /> Available</span>
-        </div>
-      </section>
+          <div className="board-stage">
+            {me && (
+              <BingoBoard
+                board={me.board}
+                selected={selected}
+                disabled={!isMyTurn || room.status !== "playing"}
+                onSelect={selectNumber}
+              />
+            )}
+          </div>
+          <div className="board-legend">
+            <span><i className="legend-selected" /> Selected</span>
+            <span><i className="legend-available" /> Available</span>
+          </div>
+        </section>
+
+        {chatOpen && (
+          <section className="chat-card" aria-label="Room chat">
+            <div className="chat-heading">
+              <div><h2>Room chat</h2></div>
+              <button className="chat-close" onClick={() => setChatOpen(false)} aria-label="Close chat">×</button>
+            </div>
+            <div className="messages-list">
+              {room.messages.length === 0 && <p className="empty-chat">No messages yet. Say hello! 👋</p>}
+              {room.messages.map(message => (
+                <div className={`message ${message.system ? "system-message" : message.playerId === me?.id ? "my-message" : "their-message"}`} key={message.id}>
+                  {!message.system && <strong>{message.playerId === me?.id ? "You" : message.playerName}</strong>}
+                  <p>{message.text}</p>
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+            <form className="chat-form" onSubmit={sendChat}>
+              <input value={chatInput} onChange={event => setChatInput(event.target.value)} placeholder="Write a message…" maxLength={300} />
+              <button aria-label="Send message" disabled={!chatInput.trim()}>➤</button>
+            </form>
+          </section>
+        )}
+      </div>
 
       <div className="game-actions">
         <button className="chat-toggle" onClick={() => setChatOpen(value => !value)}>
-          <span>💬</span> {chatOpen ? "Hide chat" : "Open chat"}
-          <span className="chat-count">{room.messages.length}</span>
+          <span>💬</span> {chatOpen ? "Hide chat" : "Chat"}
+          {unread > 0 && <span className="chat-count">{unread}</span>}
         </button>
-        <button className="text-button" onClick={leaveRoom}>Leave room</button>
+        <span className="footer-note game-footer">
+          {room.selectedNumbers.length}/25 picked
+          {expiryTime && ` · clears ${expiryTime}`}
+        </span>
+        <button className="text-button" onClick={leaveRoom}>Leave</button>
       </div>
-
-      {chatOpen && (
-        <section className="chat-card">
-          <div className="chat-heading"><div><h2>Room chat</h2><p>Chat with your opponent anytime</p></div><span>LIVE</span></div>
-          <div className="messages-list">
-            {room.messages.length === 0 && <p className="empty-chat">No messages yet. Say hello! 👋</p>}
-            {room.messages.map(message => (
-              <div className={`message ${message.system ? "system-message" : message.playerId === me?.id ? "my-message" : "their-message"}`} key={message.id}>
-                {!message.system && <strong>{message.playerId === me?.id ? "You" : message.playerName}</strong>}
-                <p>{message.text}</p>
-              </div>
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
-          <form className="chat-form" onSubmit={sendChat}>
-            <input value={chatInput} onChange={event => setChatInput(event.target.value)} placeholder="Write a message…" maxLength={300} />
-            <button aria-label="Send message" disabled={!chatInput.trim()}>➤</button>
-          </form>
-        </section>
-      )}
-      <p className="footer-note game-footer">
-        Numbers selected: {room.selectedNumbers.length} / 25
-        {expiryTime && ` · Room data clears at ${expiryTime}`}
-      </p>
     </main>
   );
 }

@@ -107,6 +107,7 @@ function serializeRoom(room) {
     selectedNumbers: [...room.selectedNumbers],
     currentTurn: room.currentTurn,
     winner: room.winner,
+    isTie: room.isTie,
     messages: room.messages.slice(-60),
     expiresAt: room.expiresAt,
   };
@@ -233,6 +234,7 @@ function destroyRoom(room, reason) {
   room.messages = [];
   room.currentTurn = null;
   room.winner = null;
+  room.isTie = false;
 
   rooms.delete(room.roomId);
 
@@ -294,6 +296,7 @@ io.on("connection", socket => {
           currentTurn: null,
           status: "waiting",
           winner: null,
+          isTie: false,
           messages: [],
           createdAt: now,
           expiresAt: now + ROOM_TTL_MS,
@@ -395,7 +398,9 @@ io.on("connection", socket => {
   });
 
   // RESTART GAME (only after a game has finished)
-  // New boards, cleared numbers, and the player who LOST goes first.
+  // New boards and cleared numbers.
+  // After a win: the player who LOST goes first.
+  // After a tie: a random player goes first.
   socket.on(
     "game:restart",
     (_payload, callback = () => {}) => {
@@ -431,9 +436,21 @@ io.on("connection", socket => {
         });
       }
 
-      const loser = room.players.find(
-        item => item.id !== room.winner
-      );
+      const wasTie = room.isTie;
+
+      let first;
+      let reason;
+
+      if (wasTie) {
+        first =
+          room.players[Math.floor(Math.random() * 2)];
+        reason = "The last game was a tie, so a random player goes first.";
+      } else {
+        first = room.players.find(
+          item => item.id !== room.winner
+        );
+        reason = "They lost the last game, so they go first.";
+      }
 
       room.players.forEach(item => {
         item.board = makeBoard();
@@ -441,13 +458,14 @@ io.on("connection", socket => {
 
       room.selectedNumbers = [];
       room.winner = null;
+      room.isTie = false;
       room.status = "playing";
-      room.currentTurn = loser.id;
+      room.currentTurn = first.id;
 
       room.messages.push({
         id: randomUUID(),
         system: true,
-        text: `New game started! ${loser.name} lost the last game, so they go first.`,
+        text: `New game started! ${first.name} goes first. ${reason}`,
         createdAt: new Date().toISOString(),
       });
 
@@ -517,21 +535,38 @@ io.on("connection", socket => {
 
       room.selectedNumbers.push(number);
 
-      const lines = countLines(
-        player.board,
-        room.selectedNumbers
+      // The picked number is marked on BOTH boards, so check both players.
+      const finishers = room.players.filter(
+        item =>
+          countLines(item.board, room.selectedNumbers) >= 5
       );
 
-      // Check whether the current player has won.
-      if (lines >= 5) {
+      if (finishers.length === 2) {
+        // TIE: both players completed five lines on the same pick.
         room.status = "finished";
-        room.winner = player.id;
+        room.winner = null;
+        room.isTie = true;
         room.currentTurn = null;
 
         room.messages.push({
           id: randomUUID(),
           system: true,
-          text: `${player.name} completed five lines and won!`,
+          text: "It's a tie! Both players completed five lines on the same number.",
+          createdAt: new Date().toISOString(),
+        });
+      } else if (finishers.length === 1) {
+        // One winner (could be the opponent, not necessarily the picker).
+        const winningPlayer = finishers[0];
+
+        room.status = "finished";
+        room.winner = winningPlayer.id;
+        room.isTie = false;
+        room.currentTurn = null;
+
+        room.messages.push({
+          id: randomUUID(),
+          system: true,
+          text: `${winningPlayer.name} completed five lines and won!`,
           createdAt: new Date().toISOString(),
         });
       } else {
