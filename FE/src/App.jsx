@@ -53,6 +53,7 @@ function App() {
   const [chatInput, setChatInput] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
   const [joining, setJoining] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const [restoring, setRestoring] = useState(Boolean(savedUserId && savedRoomId));
 
   const socketRef = useRef(null);
@@ -177,6 +178,16 @@ function App() {
     });
   }
 
+  function restartGame() {
+    if (restarting) return;
+    setRestarting(true);
+    socketRef.current?.emit("game:restart", {}, response => {
+      setRestarting(false);
+      if (!response?.ok) setError(response?.error || "Could not restart the game.");
+      else setError("");
+    });
+  }
+
   function sendChat(event) {
     event.preventDefault();
     const message = chatInput.trim();
@@ -280,9 +291,23 @@ function App() {
 
   const activePlayer = room.players.find(player => player.id === room.currentTurn);
   const winner = room.players.find(player => player.id === room.winner);
+  const bothOnline = room.players.length === 2 && room.players.every(player => player.connected);
   const expiryTime = room.expiresAt
     ? new Date(room.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : "";
+
+  let turnTitle;
+  let turnHint;
+  if (isMyTurn) {
+    turnTitle = "Your turn — pick a number!";
+    turnHint = "Tap any available number on your board.";
+  } else if (!room.currentTurn) {
+    turnTitle = "Waiting for both players to connect…";
+    turnHint = "A random player is picked to go first once both are online.";
+  } else {
+    turnTitle = `${activePlayer?.name || "Opponent"} is picking`;
+    turnHint = "The same number will be marked on both boards.";
+  }
 
   return (
     <main className="page game-page">
@@ -327,14 +352,27 @@ function App() {
             <p className="eyebrow">GAME OVER</p>
             <h2>{winner?.userId === userId ? "You won!" : `${winner?.name || "Your opponent"} won!`}</h2>
             <p>{winner?.name} completed five lines.</p>
+            <p>
+              {winner?.userId === userId
+                ? "Your opponent goes first in the next game."
+                : "You go first in the next game."}
+            </p>
+            <button
+              className="primary-button restart-button"
+              onClick={restartGame}
+              disabled={restarting || !bothOnline}
+            >
+              {restarting ? "Restarting..." : "Play again"}
+            </button>
+            {!bothOnline && <small>Both players need to be online to restart.</small>}
           </div>
         </section>
       ) : (
         <section className={`turn-banner ${isMyTurn ? "your-turn" : ""}`}>
           <span className="turn-icon">{isMyTurn ? "🎯" : "⏳"}</span>
           <div>
-            <strong>{isMyTurn ? "Your turn — pick a number!" : `${activePlayer?.name || "Opponent"} is picking`}</strong>
-            <small>{isMyTurn ? "Tap any available number on your board." : "The same number will be marked on both boards."}</small>
+            <strong>{turnTitle}</strong>
+            <small>{turnHint}</small>
           </div>
           <span className="line-count">{myLines}/5 <small>lines</small></span>
         </section>

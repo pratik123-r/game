@@ -144,6 +144,41 @@ function isExpired(room) {
   return Date.now() >= room.expiresAt;
 }
 
+// True only when the room has two players and both are online.
+function bothConnected(room) {
+  return (
+    room.players.length === 2 &&
+    room.players.every(player => Boolean(player.socketId))
+  );
+}
+
+// Give a random first turn, but only once BOTH players are connected.
+// Does nothing if a turn is already set, the game is not running,
+// or someone is still offline (it is retried on every join/reconnect).
+function assignRandomTurn(room) {
+  if (
+    room.status !== "playing" ||
+    room.currentTurn ||
+    !bothConnected(room)
+  ) {
+    return false;
+  }
+
+  const first =
+    room.players[Math.floor(Math.random() * 2)];
+
+  room.currentTurn = first.id;
+
+  room.messages.push({
+    id: randomUUID(),
+    system: true,
+    text: `${first.name} goes first!`,
+    createdAt: new Date().toISOString(),
+  });
+
+  return true;
+}
+
 // Detach a socket from whatever room it is in. The player's seat, board
 // and the game state are kept so they can come back (refresh/reconnect).
 function detachSocket(socket) {
@@ -335,23 +370,13 @@ io.on("connection", socket => {
         room.status === "waiting"
       ) {
         room.status = "playing";
-
-        room.currentTurn =
-          room.players[
-            Math.floor(Math.random() * 2)
-          ].id;
-
-        room.messages.push({
-          id: randomUUID(),
-          system: true,
-          text: `${
-            room.players.find(
-              item => item.id === room.currentTurn
-            ).name
-          } goes first!`,
-          createdAt: new Date().toISOString(),
-        });
+        room.currentTurn = null;
       }
+
+      // Random first turn - only once both players are connected.
+      // Also covers the case where the game started while one player
+      // was offline: the turn is given as soon as they reconnect.
+      assignRandomTurn(room);
 
       callback({
         ok: true,
@@ -368,6 +393,71 @@ io.on("connection", socket => {
     detachSocket(socket);
     callback({ ok: true });
   });
+
+  // RESTART GAME (only after a game has finished)
+  // New boards, cleared numbers, and the player who LOST goes first.
+  socket.on(
+    "game:restart",
+    (_payload, callback = () => {}) => {
+      const room = rooms.get(socket.data.roomId);
+
+      if (!room) {
+        return callback({
+          ok: false,
+          error: "Room not found.",
+        });
+      }
+
+      const player = findPlayer(room, socket.id);
+
+      if (!player) {
+        return callback({
+          ok: false,
+          error: "You are not an active player in this room.",
+        });
+      }
+
+      if (room.status !== "finished") {
+        return callback({
+          ok: false,
+          error: "The game has not finished yet.",
+        });
+      }
+
+      if (room.players.length !== 2) {
+        return callback({
+          ok: false,
+          error: "Both players are needed to restart.",
+        });
+      }
+
+      const loser = room.players.find(
+        item => item.id !== room.winner
+      );
+
+      room.players.forEach(item => {
+        item.board = makeBoard();
+      });
+
+      room.selectedNumbers = [];
+      room.winner = null;
+      room.status = "playing";
+      room.currentTurn = loser.id;
+
+      room.messages.push({
+        id: randomUUID(),
+        system: true,
+        text: `New game started! ${loser.name} lost the last game, so they go first.`,
+        createdAt: new Date().toISOString(),
+      });
+
+      room.messages = room.messages.slice(-100);
+
+      callback({ ok: true });
+
+      sendRoom(room);
+    }
+  );
 
   // SELECT NUMBER
   socket.on(
