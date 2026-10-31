@@ -1,4 +1,3 @@
-
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -24,10 +23,14 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3001;
 
+// roomId -> room. The backend is the single source of truth.
 const rooms = new Map();
 
-const DISCONNECT_GRACE_MS = 60_000;
-const ROOM_CLEANUP_DELAY_MS = 10_000;
+// All room data is wiped this long after the room was created.
+const ROOM_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const SWEEP_INTERVAL_MS = 60 * 1000; // check every minute
+
+const USER_ID_PATTERN = /^[A-Za-z0-9_.-]{3,20}$/;
 
 const WINNING_LINES = [];
 
@@ -95,6 +98,7 @@ function serializeRoom(room) {
 
     players: room.players.map(player => ({
       id: player.id,
+      userId: player.userId,
       name: player.name,
       board: player.board,
       connected: Boolean(player.socketId),
@@ -104,6 +108,7 @@ function serializeRoom(room) {
     currentTurn: room.currentTurn,
     winner: room.winner,
     messages: room.messages.slice(-60),
+    expiresAt: room.expiresAt,
   };
 }
 
@@ -123,6 +128,11 @@ function cleanRoomId(value) {
     .replace(/\s+/g, "");
 }
 
+// Normalize user IDs (case is kept for display, compared case-insensitively).
+function cleanUserId(value) {
+  return String(value || "").trim();
+}
+
 // Find a player using their active socket ID.
 function findPlayer(room, socketId) {
   return room.players.find(
@@ -130,82 +140,118 @@ function findPlayer(room, socketId) {
   );
 }
 
-// Remove a room if it has no players.
-function removeEmptyRoom(room) {
-  if (room.players.length === 0) {
-    rooms.delete(room.roomId);
+function isExpired(room) {
+  return Date.now() >= room.expiresAt;
+}
+
+// Detach a socket from whatever room it is in. The player's seat, board
+// and the game state are kept so they can come back (refresh/reconnect).
+function detachSocket(socket) {
+  const roomId = socket.data.roomId;
+
+  socket.data.roomId = null;
+  socket.data.userKey = null;
+
+  if (!roomId) {
+    return;
   }
+
+  socket.leave(roomId);
+
+  const room = rooms.get(roomId);
+
+  if (!room) {
+    return;
+  }
+
+  const player = findPlayer(room, socket.id);
+
+  if (!player) {
+    return;
+  }
+
+  player.socketId = null;
+
+  sendRoom(room);
 }
 
-// Automatically clean up a finished game.
-function cleanupFinishedRoom(room) {
-  setTimeout(() => {
-    // Make sure the room has not been replaced.
-    if (rooms.get(room.roomId) !== room) {
+// Permanently delete a room and release everyone in it.
+function destroyRoom(room, reason) {
+  io.to(room.roomId).emit("room:expired", { reason });
+
+  room.players.forEach(player => {
+    if (!player.socketId) {
       return;
     }
 
-    if (room.status !== "finished") {
-      return;
+    const playerSocket = io.sockets.sockets.get(player.socketId);
+
+    if (playerSocket) {
+      playerSocket.leave(room.roomId);
+      playerSocket.data.roomId = null;
+      playerSocket.data.userKey = null;
     }
+  });
 
-    // Clear player disconnect timers and release sockets.
-    room.players.forEach(player => {
-      if (player.disconnectTimer) {
-        clearTimeout(player.disconnectTimer);
-        player.disconnectTimer = null;
-      }
+  room.players = [];
+  room.selectedNumbers = [];
+  room.messages = [];
+  room.currentTurn = null;
+  room.winner = null;
 
-      if (player.socketId) {
-        const playerSocket = io.sockets.sockets.get(
-          player.socketId
-        );
+  rooms.delete(room.roomId);
 
-        if (playerSocket) {
-          playerSocket.leave(room.roomId);
-
-          playerSocket.data.roomId = null;
-          playerSocket.data.playerToken = null;
-        }
-      }
-    });
-
-    // Clear all game data.
-    room.players = [];
-    room.selectedNumbers = [];
-    room.messages = [];
-    room.currentTurn = null;
-    room.winner = null;
-
-    // Delete the room from server memory.
-    rooms.delete(room.roomId);
-
-    console.log(
-      `Finished room ${room.roomId} cleaned up successfully.`
-    );
-  }, ROOM_CLEANUP_DELAY_MS);
+  console.log(`Room ${room.roomId} cleared (${reason}).`);
 }
+
+// Sweep: delete every room older than 4 hours.
+const sweeper = setInterval(() => {
+  for (const room of [...rooms.values()]) {
+    if (isExpired(room)) {
+      destroyRoom(room, "expired after 4 hours");
+    }
+  }
+}, SWEEP_INTERVAL_MS);
+
+sweeper.unref();
 
 io.on("connection", socket => {
 
-  // JOIN ROOM
+  // JOIN ROOM (new player, or existing player restoring their seat)
   socket.on(
     "room:join",
     (payload = {}, callback = () => {}) => {
       const roomId = cleanRoomId(payload.roomId);
+      const userId = cleanUserId(payload.userId);
 
       if (!roomId || roomId.length > 24) {
-        callback({
+        return callback({
           ok: false,
           error: "Enter a room ID between 1 and 24 characters.",
         });
-
-        return;
       }
+
+      if (!USER_ID_PATTERN.test(userId)) {
+        return callback({
+          ok: false,
+          error:
+            "User ID must be 3-20 characters: letters, numbers, dot, dash or underscore.",
+        });
+      }
+
+      const userKey = userId.toLowerCase();
 
       let room = rooms.get(roomId);
 
+      // An expired room is treated as non-existent.
+      if (room && isExpired(room)) {
+        destroyRoom(room, "expired after 4 hours");
+        room = null;
+      }
+
       if (!room) {
+        const now = Date.now();
+
         room = {
           roomId,
           players: [],
@@ -214,64 +260,65 @@ io.on("connection", socket => {
           status: "waiting",
           winner: null,
           messages: [],
+          createdAt: now,
+          expiresAt: now + ROOM_TTL_MS,
         };
 
         rooms.set(roomId, room);
       }
 
-      // Attempt to restore a previously reserved player seat.
-      const token = String(payload.playerToken || "");
+      // If this socket was sitting in a different room, release that seat.
+      if (
+        socket.data.roomId &&
+        socket.data.roomId !== roomId
+      ) {
+        detachSocket(socket);
+      }
 
-      let player = token
-        ? room.players.find(item => item.token === token)
-        : null;
+      // Existing player in this room with the same User ID?
+      let player = room.players.find(
+        item => item.userKey === userKey
+      );
 
       if (player) {
-        if (
-          player.socketId &&
-          player.socketId !== socket.id
-        ) {
-          callback({
-            ok: false,
-            error: "That player is already connected in this room.",
-          });
+        // Same user opened the room again (refresh / new tab):
+        // take over the seat and drop the stale connection.
+        if (player.socketId && player.socketId !== socket.id) {
+          const oldSocket = io.sockets.sockets.get(
+            player.socketId
+          );
 
-          return;
+          if (oldSocket) {
+            oldSocket.emit("session:replaced");
+            oldSocket.leave(roomId);
+            oldSocket.data.roomId = null;
+            oldSocket.data.userKey = null;
+          }
         }
 
         player.socketId = socket.id;
-
-        if (player.disconnectTimer) {
-          clearTimeout(player.disconnectTimer);
-        }
-
-        player.disconnectTimer = null;
       } else {
         if (room.players.length >= 2) {
-          callback({
+          return callback({
             ok: false,
             error: "This room is full. Only two players can join.",
           });
-
-          return;
         }
 
         if (room.status === "finished") {
-          callback({
+          return callback({
             ok: false,
             error: "This game has finished. Create a new room to play again.",
           });
-
-          return;
         }
 
         player = {
           id: randomUUID(),
-          token: randomUUID(),
-          name: `Player ${room.players.length + 1}`,
+          userId,
+          userKey,
+          name: userId,
           board: makeBoard(),
           socketId: socket.id,
-          disconnectTimer: null,
         };
 
         room.players.push(player);
@@ -280,7 +327,7 @@ io.on("connection", socket => {
       socket.join(roomId);
 
       socket.data.roomId = roomId;
-      socket.data.playerToken = player.token;
+      socket.data.userKey = userKey;
 
       // Start the game when both players have joined.
       if (
@@ -308,7 +355,6 @@ io.on("connection", socket => {
 
       callback({
         ok: true,
-        playerToken: player.token,
         playerId: player.id,
         room: serializeRoom(room),
       });
@@ -316,6 +362,12 @@ io.on("connection", socket => {
       sendRoom(room);
     }
   );
+
+  // LEAVE ROOM (seat and game state are kept until the room expires)
+  socket.on("room:leave", (_payload, callback = () => {}) => {
+    detachSocket(socket);
+    callback({ ok: true });
+  });
 
   // SELECT NUMBER
   socket.on(
@@ -393,10 +445,10 @@ io.on("connection", socket => {
           createdAt: new Date().toISOString(),
         });
       } else {
+        // Pass the turn to the other player, even if they are
+        // temporarily disconnected (they can refresh and continue).
         const nextPlayer = room.players.find(
-          item =>
-            item.id !== player.id &&
-            item.socketId
+          item => item.id !== player.id
         );
 
         room.currentTurn = nextPlayer?.id || null;
@@ -404,13 +456,7 @@ io.on("connection", socket => {
 
       callback({ ok: true });
 
-      // Notify both players before cleaning up.
       sendRoom(room);
-
-      // Schedule cleanup after the game finishes.
-      if (room.status === "finished") {
-        cleanupFinishedRoom(room);
-      }
     }
   );
 
@@ -465,66 +511,11 @@ io.on("connection", socket => {
     }
   );
 
-  // HANDLE PLAYER DISCONNECTION
+  // HANDLE DISCONNECTION
+  // The player keeps their seat, board and turn. They only get marked
+  // as "Reconnecting..." until they come back with the same User ID.
   socket.on("disconnect", () => {
-    const room = rooms.get(socket.data.roomId);
-
-    if (!room) {
-      return;
-    }
-
-    const player = findPlayer(room, socket.id);
-
-    if (!player) {
-      return;
-    }
-
-    player.socketId = null;
-
-    player.disconnectTimer = setTimeout(() => {
-      const currentRoom = rooms.get(room.roomId);
-
-      if (!currentRoom) {
-        return;
-      }
-
-      const index = currentRoom.players.findIndex(
-        item => item.token === player.token
-      );
-
-      if (
-        index !== -1 &&
-        !currentRoom.players[index].socketId
-      ) {
-        currentRoom.players.splice(index, 1);
-
-        if (currentRoom.status === "playing") {
-          currentRoom.status = "waiting";
-          currentRoom.currentTurn = null;
-          currentRoom.selectedNumbers = [];
-          currentRoom.winner = null;
-
-          currentRoom.messages.push({
-            id: randomUUID(),
-            system: true,
-            text: "A player left. The room is waiting for another player; the game will restart when they join.",
-            createdAt: new Date().toISOString(),
-          });
-        }
-
-        removeEmptyRoom(currentRoom);
-
-        if (rooms.has(currentRoom.roomId)) {
-          sendRoom(currentRoom);
-        }
-      }
-    }, DISCONNECT_GRACE_MS);
-
-    if (room.currentTurn === player.id) {
-      room.currentTurn = null;
-    }
-
-    sendRoom(room);
+    detachSocket(socket);
   });
 });
 

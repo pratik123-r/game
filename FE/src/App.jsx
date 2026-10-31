@@ -3,34 +3,113 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3001";
-const TOKEN_PREFIX = "buddy-bingo-token:";
 
-function getSavedToken(roomId) {
-  try { return localStorage.getItem(TOKEN_PREFIX + roomId) || ""; }
-  catch { return ""; }
+const USER_KEY = "buddy-bingo-user";
+const SESSION_KEY = "buddy-bingo-session";
+const STORAGE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours, same as the backend
+const USER_ID_PATTERN = /^[A-Za-z0-9_.-]{3,20}$/;
+
+// localStorage helpers: values are stored with a timestamp and expire after 4 hours.
+function readStored(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return "";
+    const data = JSON.parse(raw);
+    if (!data?.value || Date.now() - data.savedAt > STORAGE_TTL_MS) {
+      localStorage.removeItem(key);
+      return "";
+    }
+    return data.value;
+  } catch {
+    return "";
+  }
+}
+
+function writeStored(key, value) {
+  try { localStorage.setItem(key, JSON.stringify({ value, savedAt: Date.now() })); }
+  catch {}
+}
+
+function clearStored(key) {
+  try { localStorage.removeItem(key); }
+  catch {}
+}
+
+function emitJoin(socket, roomId, userId, callback) {
+  socket.emit("room:join", { roomId, userId }, callback);
 }
 
 function App() {
+  const savedUserId = useMemo(() => readStored(USER_KEY), []);
+  const savedRoomId = useMemo(() => (savedUserId ? readStored(SESSION_KEY) : ""), [savedUserId]);
+
+  const [userId, setUserId] = useState(savedUserId);
+  const [userInput, setUserInput] = useState("");
   const [roomInput, setRoomInput] = useState("");
   const [roomId, setRoomId] = useState("");
   const [room, setRoom] = useState(null);
-  const [playerId, setPlayerId] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [chatInput, setChatInput] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
   const [joining, setJoining] = useState(false);
+  const [restoring, setRestoring] = useState(Boolean(savedUserId && savedRoomId));
+
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
+  // The room/user this browser should be sitting in (used for auto-rejoin on refresh/reconnect).
+  const sessionRef = useRef(savedUserId && savedRoomId ? { userId: savedUserId, roomId: savedRoomId } : null);
 
   useEffect(() => {
     const socket = io(SERVER_URL, { autoConnect: true, transports: ["websocket", "polling"] });
     socketRef.current = socket;
+
+    // Runs on first connect (page load/refresh) and on every automatic reconnect.
+    socket.on("connect", () => {
+      const session = sessionRef.current;
+      if (!session) return;
+      emitJoin(socket, session.roomId, session.userId, response => {
+        setRestoring(false);
+        if (!response?.ok) {
+          sessionRef.current = null;
+          clearStored(SESSION_KEY);
+          setRoom(null);
+          setRoomId("");
+          setError(response?.error || "Could not restore your game.");
+          return;
+        }
+        setRoomId(session.roomId);
+        setRoom(response.room);
+        setError("");
+      });
+    });
+
     socket.on("room:update", updatedRoom => {
       setRoom(updatedRoom);
       setError("");
     });
-    socket.on("connect_error", () => setError("Cannot connect to the game server. Check the server URL and try again."));
+
+    socket.on("room:expired", () => {
+      sessionRef.current = null;
+      clearStored(SESSION_KEY);
+      setRoom(null);
+      setRoomId("");
+      setNotice("");
+      setError("This room expired after 4 hours and its data was cleared.");
+    });
+
+    socket.on("session:replaced", () => {
+      sessionRef.current = null;
+      setRoom(null);
+      setRoomId("");
+      setError("This game was opened in another tab or window.");
+    });
+
+    socket.on("connect_error", () => {
+      setRestoring(false);
+      setError("Cannot connect to the game server. Check the server URL and try again.");
+    });
+
     return () => {
       socket.disconnect();
       socketRef.current = null;
@@ -41,34 +120,53 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [room?.messages?.length]);
 
-  const me = useMemo(() => room?.players?.find(player => player.id === playerId), [room, playerId]);
-  const opponent = useMemo(() => room?.players?.find(player => player.id !== playerId), [room, playerId]);
-  const isMyTurn = Boolean(room && room.status === "playing" && room.currentTurn === playerId);
+  const me = useMemo(() => room?.players?.find(player => player.userId === userId), [room, userId]);
+  const isMyTurn = Boolean(room && me && room.status === "playing" && room.currentTurn === me.id);
   const selected = useMemo(() => new Set(room?.selectedNumbers || []), [room?.selectedNumbers]);
   const myLines = useMemo(() => countLines(me?.board || [], selected), [me, selected]);
 
   function joinRoom(event) {
     event.preventDefault();
+
+    const uid = (userId || userInput).trim();
     const id = roomInput.trim().toUpperCase().replace(/\s+/g, "");
+
+    if (!uid) return setError("Enter a User ID first.");
+    if (!USER_ID_PATTERN.test(uid)) {
+      return setError("User ID must be 3-20 characters: letters, numbers, dot, dash or underscore.");
+    }
     if (!id) return setError("Enter a room ID first.");
     if (id.length > 24) return setError("Room IDs can be up to 24 characters.");
+
     const socket = socketRef.current;
     if (!socket?.connected) return setError("Connecting to the server. Please try again in a moment.");
 
     setJoining(true);
     setError("");
-    socket.emit("room:join", { roomId: id, playerToken: getSavedToken(id) }, response => {
+
+    emitJoin(socket, id, uid, response => {
       setJoining(false);
       if (!response?.ok) {
         setError(response?.error || "Could not join this room.");
         return;
       }
-      try { localStorage.setItem(TOKEN_PREFIX + id, response.playerToken); } catch {}
+      writeStored(USER_KEY, uid);
+      writeStored(SESSION_KEY, id);
+      sessionRef.current = { userId: uid, roomId: id };
+      setUserId(uid);
       setRoomId(id);
-      setPlayerId(response.playerId);
       setRoom(response.room);
       setNotice("");
     });
+  }
+
+  function changeUser() {
+    clearStored(USER_KEY);
+    clearStored(SESSION_KEY);
+    sessionRef.current = null;
+    setUserId("");
+    setUserInput("");
+    setError("");
   }
 
   function selectNumber(number) {
@@ -98,14 +196,28 @@ function App() {
     }
   }
 
+  // Leaving only detaches this browser. The seat and game stay on the server
+  // until the room expires, so you can re-enter the same Room ID and continue.
   function leaveRoom() {
-    socketRef.current?.disconnect();
-    socketRef.current?.connect();
+    sessionRef.current = null;
+    clearStored(SESSION_KEY);
+    socketRef.current?.emit("room:leave", {}, () => {});
     setRoom(null);
     setRoomId("");
-    setPlayerId("");
     setError("");
     setNotice("");
+  }
+
+  if (restoring) {
+    return (
+      <main className="page lobby-page">
+        <section className="brand">
+          <div className="brand-mark">B</div>
+          <h1>Buddy <span>Bingo</span></h1>
+          <p className="subheading">Restoring your game…</p>
+        </section>
+      </main>
+    );
   }
 
   if (!room) {
@@ -120,6 +232,28 @@ function App() {
 
         <form className="join-card" onSubmit={joinRoom}>
           <h2>Join a game</h2>
+
+          {userId ? (
+            <p className="user-line">
+              Playing as <strong>{userId}</strong>{" "}
+              <button type="button" className="text-button" onClick={changeUser}>Not you?</button>
+            </p>
+          ) : (
+            <>
+              <p>Pick a unique User ID. It is saved in this browser so you can come back to your game.</p>
+              <label htmlFor="user-id">User ID</label>
+              <input
+                id="user-id"
+                value={userInput}
+                onChange={event => setUserInput(event.target.value)}
+                placeholder="e.g. pratik_01"
+                maxLength={20}
+                autoComplete="off"
+                autoCapitalize="off"
+              />
+            </>
+          )}
+
           <p>Enter a room ID. Share the same ID with your friend.</p>
           <label htmlFor="room-id">Room ID</label>
           <input
@@ -139,13 +273,16 @@ function App() {
             <span>5 × 5 board</span><span>2 players max</span><span>Live chat</span>
           </div>
         </form>
-        <p className="footer-note">No account needed · Your player number is assigned automatically</p>
+        <p className="footer-note">No account needed · Game data is cleared after 4 hours</p>
       </main>
     );
   }
 
   const activePlayer = room.players.find(player => player.id === room.currentTurn);
   const winner = room.players.find(player => player.id === room.winner);
+  const expiryTime = room.expiresAt
+    ? new Date(room.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
 
   return (
     <main className="page game-page">
@@ -165,7 +302,7 @@ function App() {
           <div className={`player-chip ${room.currentTurn === player.id && room.status === "playing" ? "is-active" : ""}`} key={player.id}>
             <div className={`player-avatar avatar-${index + 1}`}>{index + 1}</div>
             <div className="player-info">
-              <strong>{player.name}{player.id === playerId ? " (You)" : ""}</strong>
+              <strong>{player.name}{player.userId === userId ? " (You)" : ""}</strong>
               <small>{player.connected ? "Connected" : "Reconnecting..."}</small>
             </div>
             {room.currentTurn === player.id && room.status === "playing" && <span className="turn-dot" />}
@@ -188,7 +325,7 @@ function App() {
           <div className="winner-trophy">🏆</div>
           <div>
             <p className="eyebrow">GAME OVER</p>
-            <h2>{winner?.id === playerId ? "You won!" : `${winner?.name || "Your opponent"} won!`}</h2>
+            <h2>{winner?.userId === userId ? "You won!" : `${winner?.name || "Your opponent"} won!`}</h2>
             <p>{winner?.name} completed five lines.</p>
           </div>
         </section>
@@ -232,8 +369,8 @@ function App() {
           <div className="messages-list">
             {room.messages.length === 0 && <p className="empty-chat">No messages yet. Say hello! 👋</p>}
             {room.messages.map(message => (
-              <div className={`message ${message.system ? "system-message" : message.playerId === playerId ? "my-message" : "their-message"}`} key={message.id}>
-                {!message.system && <strong>{message.playerId === playerId ? "You" : message.playerName}</strong>}
+              <div className={`message ${message.system ? "system-message" : message.playerId === me?.id ? "my-message" : "their-message"}`} key={message.id}>
+                {!message.system && <strong>{message.playerId === me?.id ? "You" : message.playerName}</strong>}
                 <p>{message.text}</p>
               </div>
             ))}
@@ -245,7 +382,10 @@ function App() {
           </form>
         </section>
       )}
-      <p className="footer-note game-footer">Numbers selected: {room.selectedNumbers.length} / 25</p>
+      <p className="footer-note game-footer">
+        Numbers selected: {room.selectedNumbers.length} / 25
+        {expiryTime && ` · Room data clears at ${expiryTime}`}
+      </p>
     </main>
   );
 }
