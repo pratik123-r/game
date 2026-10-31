@@ -62,7 +62,7 @@ function App() {
   const [restoring, setRestoring] = useState(Boolean(savedUserId && savedRoomId));
 
   const socketRef = useRef(null);
-  const messagesEndRef = useRef(null);
+  const messagesListRef = useRef(null);
   // The room/user this browser should be sitting in (used for auto-rejoin on refresh/reconnect).
   const sessionRef = useRef(savedUserId && savedRoomId ? { userId: savedUserId, roomId: savedRoomId } : null);
 
@@ -126,10 +126,54 @@ function App() {
   }, []);
 
   const messageCount = room?.messages?.length || 0;
+  const inGame = Boolean(room);
 
-  // Keep the chat scrolled to the newest message while it is open.
+  // Game screen never scrolls: lock the page while a room is open.
   useEffect(() => {
-    if (chatOpen) messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!inGame) return undefined;
+    document.documentElement.classList.add("no-scroll");
+    return () => document.documentElement.classList.remove("no-scroll");
+  }, [inGame]);
+
+  // Full-screen chat: follow the visible viewport so the keyboard never covers the input.
+  useEffect(() => {
+    if (!chatOpen) return undefined;
+    const vv = window.visualViewport;
+    const root = document.documentElement;
+
+    function sync() {
+      root.style.setProperty("--chat-h", `${vv ? vv.height : window.innerHeight}px`);
+      window.scrollTo(0, 0);
+    }
+
+    sync();
+    vv?.addEventListener("resize", sync);
+    vv?.addEventListener("scroll", sync);
+    window.addEventListener("resize", sync);
+
+    return () => {
+      vv?.removeEventListener("resize", sync);
+      vv?.removeEventListener("scroll", sync);
+      window.removeEventListener("resize", sync);
+      root.style.removeProperty("--chat-h");
+    };
+  }, [chatOpen]);
+
+  // Esc closes the chat.
+  useEffect(() => {
+    if (!chatOpen) return undefined;
+    function onKey(event) {
+      if (event.key === "Escape") setChatOpen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [chatOpen]);
+
+  // Keep the message list (only) scrolled to the newest message.
+  useEffect(() => {
+    if (!chatOpen) return;
+    const list = messagesListRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
   }, [messageCount, chatOpen]);
 
   // While chat is open, everything counts as read.
@@ -342,6 +386,8 @@ function App() {
     turnHint = "The number is marked on both boards.";
   }
 
+  const opponent = room.players.find(player => player.id !== me?.id);
+
   return (
     <main className="page game-page">
       <header className="game-header">
@@ -420,7 +466,7 @@ function App() {
         </section>
       )}
 
-      <div className={`game-main ${chatOpen ? "chat-is-open" : ""}`}>
+      <div className="game-main">
         <section className="board-card">
           <div className="board-heading">
             <h2>Your board</h2>
@@ -441,34 +487,11 @@ function App() {
             <span><i className="legend-available" /> Available</span>
           </div>
         </section>
-
-        {chatOpen && (
-          <section className="chat-card" aria-label="Room chat">
-            <div className="chat-heading">
-              <div><h2>Room chat</h2></div>
-              <button className="chat-close" onClick={() => setChatOpen(false)} aria-label="Close chat">×</button>
-            </div>
-            <div className="messages-list">
-              {room.messages.length === 0 && <p className="empty-chat">No messages yet. Say hello! 👋</p>}
-              {room.messages.map(message => (
-                <div className={`message ${message.system ? "system-message" : message.playerId === me?.id ? "my-message" : "their-message"}`} key={message.id}>
-                  {!message.system && <strong>{message.playerId === me?.id ? "You" : message.playerName}</strong>}
-                  <p>{message.text}</p>
-                </div>
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-            <form className="chat-form" onSubmit={sendChat}>
-              <input value={chatInput} onChange={event => setChatInput(event.target.value)} placeholder="Write a message…" maxLength={300} />
-              <button aria-label="Send message" disabled={!chatInput.trim()}>➤</button>
-            </form>
-          </section>
-        )}
       </div>
 
       <div className="game-actions">
-        <button className="chat-toggle" onClick={() => setChatOpen(value => !value)}>
-          <span>💬</span> {chatOpen ? "Hide chat" : "Chat"}
+        <button className="chat-toggle" onClick={() => setChatOpen(true)}>
+          <span>💬</span> Chat
           {unread > 0 && <span className="chat-count">{unread}</span>}
         </button>
         <span className="footer-note game-footer">
@@ -477,6 +500,49 @@ function App() {
         </span>
         <button className="text-button" onClick={leaveRoom}>Leave</button>
       </div>
+
+      {/* Full-viewport chat. Only the message list scrolls. */}
+      {chatOpen && (
+        <div className="chat-overlay" role="dialog" aria-modal="true" aria-label="Room chat">
+          <section className="chat-card">
+            <div className="chat-heading">
+              <div className="chat-title">
+                <h2>Room chat</h2>
+                <p>
+                  {opponent
+                    ? `${opponent.name} · ${opponent.connected ? "online" : "offline"}`
+                    : `Room ${roomId}`}
+                </p>
+              </div>
+              <button className="chat-close" onClick={() => setChatOpen(false)} aria-label="Close chat">×</button>
+            </div>
+
+            <div className="messages-list" ref={messagesListRef}>
+              {room.messages.length === 0 && <p className="empty-chat">No messages yet. Say hello! 👋</p>}
+              {room.messages.map(message => (
+                <div
+                  className={`message ${message.system ? "system-message" : message.playerId === me?.id ? "my-message" : "their-message"}`}
+                  key={message.id}
+                >
+                  {!message.system && <strong>{message.playerId === me?.id ? "You" : message.playerName}</strong>}
+                  <p>{message.text}</p>
+                </div>
+              ))}
+            </div>
+
+            <form className="chat-form" onSubmit={sendChat}>
+              <input
+                value={chatInput}
+                onChange={event => setChatInput(event.target.value)}
+                placeholder="Write a message…"
+                maxLength={300}
+                autoComplete="off"
+              />
+              <button aria-label="Send message" disabled={!chatInput.trim()}>➤</button>
+            </form>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

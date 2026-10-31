@@ -17,6 +17,8 @@
 * { box-sizing: border-box; }
 html, body, #root { margin: 0; min-height: 100%; }
 body { min-width: 320px; min-height: 100vh; background: radial-gradient(ellipse at 50% -15%, #263d5d 0, #101827 48%); }
+/* Game screen: the page itself never scrolls */
+html.no-scroll, html.no-scroll body { height: 100%; overflow: hidden; overscroll-behavior: none; }
 button, input { font: inherit; }
 button { -webkit-tap-highlight-color: transparent; cursor: pointer; }
 button:disabled { cursor: not-allowed; }
@@ -37,7 +39,6 @@ h1 span { color: var(--accent); }
 .join-card h2, .waiting-card h2, .board-heading h2, .chat-heading h2 { margin-bottom: 6px; font: 700 20px 'Space Grotesk'; }
 .join-card > p, .waiting-card > p { color: var(--muted); font-size: 13px; line-height: 1.55; margin-bottom: 22px; }
 .join-card > p.user-line { color: #dce4f0; margin-bottom: 16px; }
-.join-card input + p, .join-card p + label { margin-top: 4px; }
 label { display: block; margin-bottom: 8px; color: #dce4f0; font-size: 12px; font-weight: 700; }
 input { width: 100%; min-width: 0; border: 1px solid #35445c; outline: none; background: #111c2d; color: white; border-radius: 12px; padding: 14px 15px; font-size: 16px; }
 input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #a8f06a20; }
@@ -47,12 +48,16 @@ input::placeholder { color: #718099; }
 .rules-mini { display: flex; justify-content: space-between; gap: 8px; margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; }
 .footer-note { margin: 20px 0 0; text-align: center; color: #718099; font-size: 11px; }
 .error-message { margin: 12px 0 0 !important; color: #ff9a9a !important; font-size: 12px !important; }
-.text-button { border: 0; background: transparent; color: #9aa8bd; font-size: 11px; text-decoration: underline; padding: 4px 6px; }
+.text-button { border: 0; background: transparent; color: #9aa8bd; font-size: 11px; text-decoration: underline; padding: 6px 8px; }
 
 /* ---------- Game screen: exactly one viewport, never scrolls ---------- */
 .page.game-page {
-  width: min(100% - 24px, 520px);
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 100vh;
   height: 100dvh;
+  width: min(100% - 24px, 520px);
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -63,7 +68,7 @@ input::placeholder { color: #718099; }
 .game-header .eyebrow { margin-bottom: 2px; }
 .game-header h1 { margin: 0; font-size: 22px; }
 .game-header h1 span { color: #d9e6f7; }
-.small-button { flex: 0 0 auto; padding: 9px 13px; border: 1px solid #43536b; border-radius: 10px; background: #1c2a3f; color: #edf4ff; font-size: 11px; font-weight: 700; }
+.small-button { flex: 0 0 auto; padding: 10px 13px; border: 1px solid #43536b; border-radius: 10px; background: #1c2a3f; color: #edf4ff; font-size: 11px; font-weight: 700; }
 
 .notice, .error-banner { flex: none; padding: 8px 12px; border-radius: 10px; margin: 0; font-size: 12px; }
 .notice { color: var(--accent); background: #a8f06a12; }
@@ -110,16 +115,15 @@ input::placeholder { color: #718099; }
 .winner-text p { color: #e5d4b2; }
 .restart-button { flex: none; width: auto; min-height: 0; margin: 0; padding: 10px 14px; font-size: 12px; }
 
-/* ---------- Main area: board + chat share all remaining height ---------- */
-.game-main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
-
+/* ---------- Board: takes all remaining height, never overlaps ---------- */
+.game-main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .board-card { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px; }
 .board-heading { flex: none; display: flex; align-items: center; justify-content: space-between; margin: 0; }
 .board-heading h2 { margin: 0; font-size: 16px; }
 .board-tag { padding: 5px 9px; border-radius: 8px; background: #293951; color: #c9d6e7; font-size: 10px; font-weight: 700; }
 
 /* The stage is the leftover space; the grid is the biggest square that fits it */
-.board-stage { flex: 1; min-height: 0; container-type: size; display: grid; place-items: center; }
+.board-stage { flex: 1; min-height: 0; container-type: size; display: grid; place-items: center; overflow: hidden; }
 .bingo-grid {
   width: min(100cqw, 100cqh);
   height: min(100cqw, 100cqh);
@@ -129,7 +133,7 @@ input::placeholder { color: #718099; }
   gap: clamp(4px, 1.8cqmin, 9px);
 }
 .bingo-cell {
-  position: relative; display: grid; place-items: center; min-width: 0; min-height: 0; padding: 0;
+  position: relative; display: grid; place-items: center; min-width: 0; min-height: 0; padding: 0; overflow: hidden;
   border: 1px solid #43536b; border-radius: clamp(8px, 2.6cqmin, 13px);
   background: #25344b; color: #f5f8ff;
   font: 700 clamp(14px, 7cqmin, 28px) 'Space Grotesk';
@@ -148,50 +152,85 @@ input::placeholder { color: #718099; }
 .legend-selected { background: var(--accent); }
 .legend-available { background: #43536b; }
 
-/* ---------- Chat: shares the screen instead of covering it ---------- */
-.chat-card { flex: none; height: 38dvh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.chat-heading { flex: none; display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); }
-.chat-heading h2 { margin: 0; font-size: 15px; }
-.chat-close { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 50%; background: #293951; color: #dce4f0; font-size: 18px; line-height: 1; }
-.messages-list { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; padding: 12px; }
-.empty-chat { margin: auto; color: var(--muted); font-size: 11px; }
-.message { max-width: 85%; padding: 8px 11px; border-radius: 12px; background: #26364d; align-self: flex-start; overflow-wrap: anywhere; }
-.message strong { display: block; margin-bottom: 3px; color: #b9d2f2; font-size: 9px; }
-.message p { margin: 0; color: #f0f4fa; font-size: 12px; line-height: 1.45; }
-.my-message { align-self: flex-end; background: #314b35; }
-.my-message strong { color: var(--accent); }
-.system-message { align-self: center; max-width: 100%; padding: 5px 9px; background: #111c2d; }
-.system-message p { color: #aebbd0; font-size: 9px; text-align: center; }
-.chat-form { flex: none; display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
-.chat-form input { padding: 10px 12px; font-size: 16px; }
-.chat-form button { flex: 0 0 42px; border: 0; border-radius: 11px; background: var(--accent); color: #172515; font-size: 19px; font-weight: 800; }
-.chat-form button:disabled { opacity: .45; }
-
 /* ---------- Bottom action bar ---------- */
 .game-actions { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; }
-.chat-toggle { display: flex; align-items: center; gap: 8px; padding: 9px 14px; border: 1px solid #43536b; border-radius: 11px; background: #202e45; color: white; font-size: 12px; font-weight: 700; }
+.chat-toggle { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border: 1px solid #43536b; border-radius: 11px; background: #202e45; color: white; font-size: 12px; font-weight: 700; }
 .chat-count { display: grid; place-items: center; min-width: 19px; height: 19px; padding: 0 5px; border-radius: 20px; background: var(--accent); color: #172515; font-size: 10px; }
 .game-footer { flex: 1; margin: 0; font-size: 10px; text-align: center; color: #718099; }
+
+/* ---------- Chat: FULL viewport overlay. Only the message list scrolls ---------- */
+.chat-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 100vh;
+  height: var(--chat-h, 100dvh);   /* follows the visible viewport (keyboard-safe) */
+  z-index: 100;
+  display: flex;
+  justify-content: center;
+  background: #101827;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+.chat-card {
+  width: min(100%, 720px);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: #131f33;
+  overflow: hidden;
+  padding-top: env(safe-area-inset-top);
+}
+.chat-heading { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); background: #192438; }
+.chat-title { min-width: 0; }
+.chat-heading h2 { margin: 0; font-size: 17px; }
+.chat-heading p { margin: 2px 0 0; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-close { flex: none; width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 50%; background: #293951; color: #dce4f0; font-size: 24px; line-height: 1; }
+
+/* The ONLY scrolling area in the whole app while playing */
+.messages-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 14px 16px;
+}
+.empty-chat { margin: auto; color: var(--muted); font-size: 13px; }
+.message { flex: none; max-width: 82%; padding: 9px 12px; border-radius: 14px; background: #26364d; align-self: flex-start; overflow-wrap: anywhere; }
+.message strong { display: block; margin-bottom: 3px; color: #b9d2f2; font-size: 10px; }
+.message p { margin: 0; color: #f0f4fa; font-size: 14px; line-height: 1.45; }
+.my-message { align-self: flex-end; background: #314b35; }
+.my-message strong { color: var(--accent); }
+.system-message { align-self: center; max-width: 100%; padding: 5px 10px; background: #111c2d; border-radius: 999px; }
+.system-message p { color: #aebbd0; font-size: 11px; text-align: center; }
+
+.chat-form { flex: none; display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: #192438; }
+.chat-form input { padding: 12px 14px; font-size: 16px; border-radius: 999px; }
+.chat-form button { flex: 0 0 46px; height: 46px; border: 0; border-radius: 50%; background: var(--accent); color: #172515; font-size: 19px; font-weight: 800; }
+.chat-form button:disabled { opacity: .45; }
 
 /* ---------- Wider screens ---------- */
 @media (min-width: 600px) {
   .page { padding-top: 42px; }
   .page.game-page { width: min(100% - 40px, 560px); padding-top: 14px; }
 }
-
-/* Desktop / tablet landscape: chat becomes a side panel next to the board */
 @media (min-width: 900px) {
-  .page.game-page { width: min(100% - 48px, 980px); }
-  .game-main { flex-direction: row; }
-  .game-main .board-card { flex: 1; }
-  .chat-card { flex: none; width: 340px; height: auto; }
+  .page.game-page { width: min(100% - 48px, 640px); }
+  .chat-overlay { background: rgba(8, 13, 24, .88); }
+  .chat-card { border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
 }
 
 /* Short screens (landscape phones): squeeze the chrome */
 @media (max-height: 640px) {
   .page.game-page { gap: 5px; padding-top: 6px; }
   .game-header .eyebrow, .board-legend, .game-footer, .turn-text small, .waiting-text p { display: none; }
-  .chat-card { height: 46dvh; }
 }
 
 @media (max-width: 380px) {
